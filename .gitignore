@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+client/node_modules/
+
+# Production build
+client/dist/
+
+# SQLite runtime databases, WAL and SHM files
+data/*.db*
+tests/*.db*
+*.db
+*.db-wal
+*.db-shm
+
+# Environment & logs
+.env
+.env.local
+*.log
+npm-debug.log*
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
