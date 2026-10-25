@@ -18,58 +18,72 @@ This document details the migration path, sizing calculations, container topolog
 
 ```mermaid
 graph TD
-    subgraph Edge Tier
-        FLEET[100,000+ Edge Devices & Gateways]
+    subgraph EdgeTier["Edge Tier"]
+        FLEET["100,000+ Edge Devices & Gateways"]
     end
 
-    subgraph Ingress & Perimeter Security
-        CLOUDFLARE[Cloudflare WAF / DDoS Shield]
-        ALB[AWS Network Load Balancer / NGINX Ingress]
+    subgraph IngressTier["Ingress & Perimeter Security"]
+        CLOUDFLARE["Cloudflare WAF / DDoS Shield"]
+        ALB["AWS Network Load Balancer / NGINX Ingress"]
     end
 
-    subgraph Kubernetes Ingestion Tier (EKS)
-        HPA[Horizontal Pod Autoscaler (10 to 40 Pods)]
-        INGEST1[Ingress Pod 1]
-        INGEST2[Ingress Pod 2]
-        INGESTN[Ingress Pod N]
+    subgraph IngestionTier["Kubernetes Ingestion Tier (EKS)"]
+        HPA["Horizontal Pod Autoscaler (10 to 40 Pods)"]
+        INGEST1["Ingress Pod 1"]
+        INGEST2["Ingress Pod 2"]
+        INGESTN["Ingress Pod N"]
     end
 
-    subgraph Distributed Messaging Bus
-        KAFKA[(Apache Kafka Cluster<br/>Partitioned by hash(deviceId) % 64)]
+    subgraph MessagingBus["Distributed Messaging Bus"]
+        KAFKA[("Apache Kafka Cluster<br/>Partitioned by hash(deviceId) % 64")]
     end
 
-    subgraph Stream Processing & Rule Evaluation
-        STREAM1[Rule Engine Worker 1]
-        STREAM2[Rule Engine Worker 2]
-        REDIS[(Redis Cluster 7.x<br/>Distributed Deduplication & Rate Limiting)]
+    subgraph ProcessingTier["Stream Processing & Rule Evaluation"]
+        STREAM1["Rule Engine Worker 1"]
+        STREAM2["Rule Engine Worker 2"]
+        REDIS[("Redis Cluster 7.x<br/>Distributed Deduplication & Rate Limiting")]
     end
 
-    subgraph Storage Tier
-        TIMESCALE[(AWS Aurora PostgreSQL + TimescaleDB<br/>Hypertables, Relational State, Incidents)]
-        S3[(Amazon S3 Parquet Lake / ClickHouse<br/>Long-Term Cold Telemetry Archive)]
+    subgraph StorageTier["Storage Tier"]
+        TIMESCALE[("AWS Aurora PostgreSQL + TimescaleDB<br/>Hypertables, Relational State, Incidents")]
+        S3[("Amazon S3 Parquet Lake / ClickHouse<br/>Long-Term Cold Telemetry Archive")]
     end
 
-    subgraph Observability & Alerts Tier
-        OTEL[OpenTelemetry Collector DaemonSet]
-        PROM[Prometheus + VictoriaMetrics]
-        GRAFANA[Grafana Ops Command Center]
-        PAGERDUTY[PagerDuty / Opsgenie Incident Webhooks]
+    subgraph ObservabilityTier["Observability & Alerts Tier"]
+        OTEL["OpenTelemetry Collector DaemonSet"]
+        PROM["Prometheus + VictoriaMetrics"]
+        GRAFANA["Grafana Ops Command Center"]
+        PAGERDUTY["PagerDuty / Opsgenie Incident Webhooks"]
     end
 
-    FLEET -->|mTLS / HTTPS| CLOUDFLARE --> ALB
+    FLEET -->|mTLS / HTTPS| CLOUDFLARE
+    CLOUDFLARE --> ALB
     ALB --> HPA
-    HPA --> INGEST1 & INGEST2 & INGESTN
+    HPA --> INGEST1
+    HPA --> INGEST2
+    HPA --> INGESTN
 
-    INGEST1 & INGEST2 & INGESTN -.->|Idempotency Check: SET NX EX| REDIS
-    INGEST1 & INGEST2 & INGESTN -->|Batch Produce| KAFKA
+    INGEST1 -.->|Idempotency Check: SET NX EX| REDIS
+    INGEST2 -.->|Idempotency Check: SET NX EX| REDIS
+    INGEST1 -->|Batch Produce| KAFKA
+    INGEST2 -->|Batch Produce| KAFKA
+    INGESTN -->|Batch Produce| KAFKA
 
-    KAFKA --> STREAM1 & STREAM2
-    STREAM1 & STREAM2 <--> REDIS
-    STREAM1 & STREAM2 -->|Batch Insert| TIMESCALE
-    STREAM1 & STREAM2 -->|Stream Raw| S3
-    STREAM1 & STREAM2 -->|Alerts via Circuit Breaker| PAGERDUTY
+    KAFKA --> STREAM1
+    KAFKA --> STREAM2
+    STREAM1 <--> REDIS
+    STREAM2 <--> REDIS
+    STREAM1 -->|Batch Insert| TIMESCALE
+    STREAM2 -->|Batch Insert| TIMESCALE
+    STREAM1 -->|Stream Raw| S3
+    STREAM2 -->|Stream Raw| S3
+    STREAM1 -->|Alerts via Circuit Breaker| PAGERDUTY
+    STREAM2 -->|Alerts via Circuit Breaker| PAGERDUTY
 
-    INGEST1 & STREAM1 --> OTEL --> PROM --> GRAFANA
+    INGEST1 --> OTEL
+    STREAM1 --> OTEL
+    OTEL --> PROM
+    PROM --> GRAFANA
 ```
 
 ---

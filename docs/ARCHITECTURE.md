@@ -22,13 +22,13 @@ SentinEdge was designed around four non-negotiable architectural axioms:
 
 ```mermaid
 graph TD
-    subgraph Edge Layer
+    subgraph EdgeLayer["Edge Layer"]
         D1["Device 1: Online Gateway<br/>(Live 1Hz Telemetry)"]
         D2["Device 2: Disconnected Node<br/>(Buffering in Flash Memory)"]
         D3["Device 3: Reconnected Node<br/>(Replaying Burst Buffer)"]
     end
 
-    subgraph Ingestion & Resilience Tier
+    subgraph IngestionResilienceTier["Ingestion & Resilience Tier"]
         API["HTTP Ingress Gateway<br/>(/api/events & /api/events/batch)"]
         BACKPRESSURE["Bounded Backpressure Queue<br/>(HTTP 429 Retry-After Enforcement)"]
         SCHEMA["Strict Schema Validator<br/>(Normalization & Type Safety)"]
@@ -36,7 +36,7 @@ graph TD
         DEDUP["Two-Tier Deduplication Engine<br/>(In-Memory LRU + SQLite PK Recovery)"]
     end
 
-    subgraph Processing & State Reconciliation
+    subgraph ProcessingTier["Processing & State Reconciliation"]
         TX["Atomic ACID Transaction Pipeline<br/>(db.transaction with BEGIN IMMEDIATE)"]
         DEVICE_SVC["Device Monotonic State Engine<br/>(Sequence & High-Water Mark Tracker)"]
         OUT_OF_ORDER_GUARD["Out-of-Order Alert Guard<br/>(Suppresses Historic False Alarms)"]
@@ -45,11 +45,11 @@ graph TD
         WATCHDOG["Heartbeat Silence Watchdog<br/>(Throttled Monitoring & Self-Healing)"]
     end
 
-    subgraph Storage Tier
+    subgraph StorageTier["Storage Tier"]
         DB[("Embedded SQLite<br/>(WAL Mode + NORMAL Synchronous)")]
     end
 
-    subgraph Real-Time Operator Cockpit
+    subgraph CockpitTier["Real-Time Operator Cockpit"]
         WS["WebSocket Server<br/>(Ping/Pong Liveness & Channel Broadcast)"]
         UI["SentinEdge Operations Dashboard<br/>(Live Roster, Incident Center, Stream, Simulator)"]
     end
