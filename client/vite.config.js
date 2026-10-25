@@ -13,7 +13,14 @@ export default defineConfig({
       },
       '/ws': {
         target: 'ws://localhost:4000',
-        ws: true
+        ws: true,
+        configure: (proxy) => {
+          proxy.on('error', (err) => {
+            // Suppress benign client-side aborts/resets on tab reload
+            if (err.code === 'ECONNABORTED' || err.code === 'ECONNRESET') return;
+            console.warn('[Vite Proxy]', err.message);
+          });
+        }
       }
     }
   }

@@ -1,8 +1,9 @@
 const dedupCache = require('../engine/dedupCache');
 
 /**
- * Event ingestion and processing pipeline.
- * Validates schemas, eliminates duplicates, reconciles device states,
+ * Event ingestion and processing pipeline for SentinEdge.
+ * Validates schemas, guarantees ACID transactional persistence, eliminates duplicates,
+ * preserves monotonic device states, guards against out-of-order false alarms,
  * and routes to the rule evaluation engine.
  */
 class EventService {
@@ -11,6 +12,13 @@ class EventService {
     this.deviceService = deviceService;
     this.ruleEngine = ruleEngine;
     this.wsBroadcaster = wsBroadcaster;
+
+    // Prepared statements compiled once for optimal throughput
+    this.insertEventStmt = this.db.prepare(`
+      INSERT INTO events (
+        id, device_id, sequence_number, timestamp, received_at, event_type, payload, is_duplicate, is_out_of_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
+    `);
   }
 
   setBroadcaster(broadcaster) {
@@ -70,10 +78,10 @@ class EventService {
   }
 
   /**
-   * Core ingestion pipeline for a single event.
+   * Core ingestion pipeline with ACID transactional guarantees and idempotency.
    */
   async processIngestedEvent(rawEvent) {
-    // 1. Validation
+    // 1. Validation check
     const validation = this.validatePayload(rawEvent);
     if (!validation.valid) {
       const err = new Error(`Malformed event payload: ${validation.errors.join('; ')}`);
@@ -84,89 +92,141 @@ class EventService {
 
     const event = validation.normalized;
 
-    // 2. Deduplication check
+    // 2. Fast-path in-memory deduplication check
     const isDuplicate = dedupCache.isDuplicate(event.id, this.db);
     if (isDuplicate) {
-      // Return idempotent success without running rules again
       return {
         id: event.id,
         deviceId: event.deviceId,
         status: 'DUPLICATE_IGNORED',
         isDuplicate: true,
+        isOutOfOrder: false,
+        wasOffline: false,
+        rulesEvaluated: 0,
+        matchedRules: [],
         message: 'Event was already ingested and processed previously.'
       };
     }
 
-    // 3. Device state update and out-of-order check
-    const { device, isOutOfOrder, wasOffline } = this.deviceService.upsertDeviceForEvent(
-      event.deviceId,
-      event.timestamp,
-      event.sequenceNumber,
-      event.metadata
-    );
+    // 3. ATOMIC ACID TRANSACTION: Wraps device state update, event insert, and rule evaluation
+    const executeAtomicTransaction = this.db.transaction(() => {
+      // Step A: Device state monotonic update & out-of-order sequence check
+      const { device, isOutOfOrder, wasOffline } = this.deviceService.upsertDeviceForEvent(
+        event.deviceId,
+        event.timestamp,
+        event.sequenceNumber,
+        event.metadata
+      );
 
-    // 4. Persist event into database
-    const payloadJson = JSON.stringify(event.payload);
-    const now = new Date().toISOString();
+      // Step B: Persist event to database with primary key duplicate protection
+      const payloadJson = JSON.stringify(event.payload);
+      const now = new Date().toISOString();
 
-    this.db.prepare(`
-      INSERT INTO events (
-        id, device_id, sequence_number, timestamp, received_at, event_type, payload, is_duplicate, is_out_of_order
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
-    `).run(
-      event.id,
-      event.deviceId,
-      event.sequenceNumber,
-      event.timestamp,
-      now,
-      event.eventType,
-      payloadJson,
-      isOutOfOrder ? 1 : 0
-    );
+      try {
+        this.insertEventStmt.run(
+          event.id,
+          event.deviceId,
+          event.sequenceNumber,
+          event.timestamp,
+          now,
+          event.eventType,
+          payloadJson,
+          isOutOfOrder ? 1 : 0
+        );
+      } catch (dbErr) {
+        // Handle database-level unique constraint collision cleanly without throwing 500 or polluting DLQ
+        const isConstraint =
+          dbErr.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' ||
+          dbErr.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+          (dbErr.message && (
+            dbErr.message.includes('UNIQUE constraint') ||
+            dbErr.message.includes('PRIMARY KEY')
+          ));
 
-    const savedEvent = {
-      id: event.id,
-      deviceId: event.deviceId,
-      sequenceNumber: event.sequenceNumber,
-      timestamp: event.timestamp,
-      receivedAt: now,
-      eventType: event.eventType,
-      payload: event.payload,
-      isOutOfOrder,
-      isDuplicate: false
-    };
+        if (isConstraint) {
+          dedupCache.record(event.id);
+          return {
+            id: event.id,
+            deviceId: event.deviceId,
+            status: 'DUPLICATE_IGNORED',
+            isDuplicate: true,
+            isOutOfOrder: false,
+            wasOffline: false,
+            rulesEvaluated: 0,
+            matchedRules: [],
+            message: 'Event was already ingested and recorded in database.'
+          };
+        }
+        throw dbErr;
+      }
 
-    // 5. Broadcast to connected real-time dashboard operators
-    if (this.wsBroadcaster) {
+      // Step C: Rule Engine Evaluation
+      // OUT-OF-ORDER GUARD: Stale historical events arriving out-of-order MUST NOT trigger active operational alerts
+      let ruleMatches = [];
+      if (!isOutOfOrder) {
+        ruleMatches = this.ruleEngine.evaluateEvent({
+          id: event.id,
+          device_id: event.deviceId,
+          event_type: event.eventType,
+          payload: event.payload,
+          timestamp: event.timestamp
+        }, device);
+      } else {
+        this.ruleEngine.logTrace(
+          event.id,
+          event.deviceId,
+          'SYS_OUT_OF_ORDER',
+          'Out-of-Order Ingestion Guard',
+          0,
+          `Telemetry arrived out-of-order (Seq #${event.sequenceNumber} < Device Seq #${device.last_sequence_number}). Stored for analytics; active rule evaluation suppressed.`
+        );
+      }
+
+      const savedEvent = {
+        id: event.id,
+        deviceId: event.deviceId,
+        sequenceNumber: event.sequenceNumber,
+        timestamp: event.timestamp,
+        receivedAt: now,
+        eventType: event.eventType,
+        payload: event.payload,
+        isOutOfOrder,
+        isDuplicate: false
+      };
+
+      return {
+        id: event.id,
+        deviceId: event.deviceId,
+        status: 'PROCESSED',
+        isDuplicate: false,
+        isOutOfOrder,
+        wasOffline,
+        rulesEvaluated: ruleMatches.length,
+        matchedRules: ruleMatches.map(m => (m.rule ? m.rule.name : m.rule_name || m.name || 'Rule')),
+        _savedEvent: savedEvent,
+        _device: device
+      };
+    });
+
+    const outcome = executeAtomicTransaction();
+
+    // 4. Broadcast to connected real-time dashboard operators (executed outside DB transaction)
+    if (!outcome.isDuplicate && this.wsBroadcaster && outcome._savedEvent) {
       this.wsBroadcaster('event:new', {
-        event: savedEvent,
+        event: outcome._savedEvent,
         device: {
-          id: device.id,
-          name: device.name,
-          status: device.status
+          id: outcome._device.id,
+          name: outcome._device.name,
+          status: outcome._device.status
         }
       });
     }
 
-    // 6. Evaluate against Rule Engine
-    const ruleMatches = this.ruleEngine.evaluateEvent({
-      id: event.id,
-      device_id: event.deviceId,
-      event_type: event.eventType,
-      payload: event.payload,
-      timestamp: event.timestamp
-    }, device);
+    // Clean internal properties before returning
+    delete outcome._savedEvent;
+    delete outcome._device;
 
-    return {
-      id: event.id,
-      deviceId: event.deviceId,
-      status: 'PROCESSED',
-      isDuplicate: false,
-      isOutOfOrder,
-      wasOffline,
-      rulesEvaluated: ruleMatches.length,
-      matchedRules: ruleMatches.map(m => m.rule.name)
-    };
+    return outcome;
   }
 
   getRecentEvents(limit = 100, filters = {}) {

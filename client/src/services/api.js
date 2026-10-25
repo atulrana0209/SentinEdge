@@ -1,5 +1,5 @@
 /**
- * MissionOps API and Resilient WebSocket Client Service
+ * SentinEdge API and Resilient WebSocket Client Service
  */
 
 const BASE_URL = '';

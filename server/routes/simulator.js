@@ -4,6 +4,16 @@ const { v4: uuidv4 } = require('uuid');
 module.exports = function createSimulatorRouter(eventService, ingestionQueue, db) {
   const router = express.Router();
 
+  // Helper to fetch next monotonic sequence for a device
+  const getNextSequence = (deviceId) => {
+    try {
+      const row = db.prepare('SELECT last_sequence_number FROM devices WHERE id = ?').get(deviceId);
+      return (row?.last_sequence_number || 0) + 1;
+    } catch {
+      return 1;
+    }
+  };
+
   // Helper to generate simulated telemetry payload
   const createSamplePayload = (deviceId, custom = {}) => ({
     temperature: +(20 + Math.random() * 15).toFixed(1),
@@ -21,7 +31,7 @@ module.exports = function createSimulatorRouter(eventService, ingestionQueue, db
       const event = {
         eventId: `evt-${uuidv4().substring(0, 8)}`,
         deviceId: deviceId,
-        sequenceNumber: req.body.sequenceNumber || Date.now() % 100000,
+        sequenceNumber: req.body.sequenceNumber || getNextSequence(deviceId),
         timestamp: new Date().toISOString(),
         type: 'telemetry',
         payload: createSamplePayload(deviceId, req.body.payload || {}),
@@ -40,10 +50,11 @@ module.exports = function createSimulatorRouter(eventService, ingestionQueue, db
     try {
       const deviceId = req.body.deviceId || 'device-002';
       const fixedEventId = `dup-${uuidv4().substring(0, 8)}`;
+      const seq = getNextSequence(deviceId);
       const event = {
         eventId: fixedEventId,
         deviceId: deviceId,
-        sequenceNumber: 101,
+        sequenceNumber: seq,
         timestamp: new Date().toISOString(),
         type: 'telemetry',
         payload: createSamplePayload(deviceId, { note: 'Initial event delivery' })
@@ -73,27 +84,28 @@ module.exports = function createSimulatorRouter(eventService, ingestionQueue, db
   router.post('/send-out-of-order', async (req, res) => {
     try {
       const deviceId = req.body.deviceId || 'device-003';
+      const baseSeq = getNextSequence(deviceId);
 
-      // Advanced sequence #50
+      // Advanced sequence #baseSeq + 20
       const eventNew = {
-        eventId: `evt-seq50-${uuidv4().substring(0, 6)}`,
+        eventId: `evt-seq-adv-${uuidv4().substring(0, 6)}`,
         deviceId: deviceId,
-        sequenceNumber: 50,
+        sequenceNumber: baseSeq + 20,
         timestamp: new Date().toISOString(),
         type: 'telemetry',
-        payload: createSamplePayload(deviceId, { note: 'Sequence 50' })
+        payload: createSamplePayload(deviceId, { note: `Advanced Sequence #${baseSeq + 20}` })
       };
       await eventService.processIngestedEvent(eventNew);
 
-      // Delayed older sequence #35 arriving later
+      // Delayed older sequence arriving later with older timestamp
       const delayedTimestamp = new Date(Date.now() - 60000).toISOString();
       const eventOld = {
-        eventId: `evt-seq35-${uuidv4().substring(0, 6)}`,
+        eventId: `evt-seq-old-${uuidv4().substring(0, 6)}`,
         deviceId: deviceId,
-        sequenceNumber: 35,
+        sequenceNumber: baseSeq,
         timestamp: delayedTimestamp,
         type: 'telemetry',
-        payload: createSamplePayload(deviceId, { note: 'Delayed Sequence 35 arriving out of order' })
+        payload: createSamplePayload(deviceId, { note: `Delayed Sequence #${baseSeq} arriving out of order` })
       };
       const resultOld = await eventService.processIngestedEvent(eventOld);
 
@@ -142,13 +154,14 @@ module.exports = function createSimulatorRouter(eventService, ingestionQueue, db
       const count = parseInt(req.body.count, 10) || 15;
       const deviceId = req.body.deviceId || 'device-buffered-004';
       const events = [];
+      const baseSeq = getNextSequence(deviceId);
 
       const baseTime = Date.now() - (count * 2000);
       for (let i = 1; i <= count; i++) {
         events.push({
           eventId: `burst-${uuidv4().substring(0, 8)}`,
           deviceId: deviceId,
-          sequenceNumber: i,
+          sequenceNumber: baseSeq + i,
           timestamp: new Date(baseTime + i * 2000).toISOString(),
           type: 'telemetry',
           payload: createSamplePayload(deviceId, {
@@ -184,7 +197,7 @@ module.exports = function createSimulatorRouter(eventService, ingestionQueue, db
       const event = {
         eventId: `evt-temp-${uuidv4().substring(0, 8)}`,
         deviceId: deviceId,
-        sequenceNumber: Date.now() % 100000,
+        sequenceNumber: getNextSequence(deviceId),
         timestamp: new Date().toISOString(),
         type: 'telemetry',
         payload: createSamplePayload(deviceId, {
@@ -213,7 +226,7 @@ module.exports = function createSimulatorRouter(eventService, ingestionQueue, db
       const event = {
         eventId: `evt-bat-${uuidv4().substring(0, 8)}`,
         deviceId: deviceId,
-        sequenceNumber: Date.now() % 100000,
+        sequenceNumber: getNextSequence(deviceId),
         timestamp: new Date().toISOString(),
         type: 'telemetry',
         payload: createSamplePayload(deviceId, {
@@ -241,7 +254,7 @@ module.exports = function createSimulatorRouter(eventService, ingestionQueue, db
       const event = {
         eventId: `evt-fault-${uuidv4().substring(0, 8)}`,
         deviceId: deviceId,
-        sequenceNumber: Date.now() % 100000,
+        sequenceNumber: getNextSequence(deviceId),
         timestamp: new Date().toISOString(),
         type: 'FAULT',
         payload: {
@@ -282,6 +295,23 @@ module.exports = function createSimulatorRouter(eventService, ingestionQueue, db
         deviceId,
         staleLastSeen: staleTime
       });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 10. Reset demo database to clean initial baseline state
+  router.post('/reset-database', (req, res) => {
+    try {
+      db.exec(`
+        DELETE FROM events;
+        DELETE FROM incidents;
+        DELETE FROM incident_events;
+        DELETE FROM dlq_events;
+        DELETE FROM evaluation_traces;
+        UPDATE devices SET status = 'ONLINE', last_sequence_number = 0, total_events = 0, last_seen_at = datetime('now');
+      `);
+      return res.json({ success: true, message: 'Platform database reset to clean baseline state.' });
     } catch (err) {
       return res.status(500).json({ success: false, error: err.message });
     }

@@ -122,5 +122,60 @@ describe('Rules Engine & Incident Management Tests', () => {
     const incidents = appInstance.incidentService.getAllIncidents({ deviceId: 'device-silent-99' });
     assert.ok(incidents.length >= 1);
     assert.strictEqual(incidents[0].rule_name, 'Device Silence / Offline Watchdog');
+    assert.strictEqual(incidents[0].status, 'OPEN');
+  });
+
+  test('Watchdog anti-fatigue throttle suppresses timeline bloat during prolonged silence', () => {
+    // Device device-silent-99 is still silent
+    const incidentBefore = appInstance.db.prepare(`
+      SELECT * FROM incidents WHERE device_id = 'device-silent-99' AND status = 'OPEN'
+    `).get();
+    assert.ok(incidentBefore);
+
+    const timelineBefore = appInstance.db.prepare(`
+      SELECT COUNT(*) as count FROM incident_events WHERE incident_id = ?
+    `).get(incidentBefore.id).count;
+
+    // Run watchdog check 3 consecutive times immediately (within the 60s cooldown window)
+    appInstance.watchdog.checkDevices();
+    appInstance.watchdog.checkDevices();
+    appInstance.watchdog.checkDevices();
+
+    const timelineAfter = appInstance.db.prepare(`
+      SELECT COUNT(*) as count FROM incident_events WHERE incident_id = ?
+    `).get(incidentBefore.id).count;
+
+    // Timeline count must NOT have increased due to anti-fatigue throttle
+    assert.strictEqual(timelineAfter, timelineBefore, 'Anti-fatigue throttle should suppress duplicate timeline entries');
+  });
+
+  test('Watchdog auto-resolves open silence incident when device resumes heartbeat', async () => {
+    // Verify device-silent-99 currently has an OPEN silence incident
+    const openIncident = appInstance.db.prepare(`
+      SELECT * FROM incidents WHERE device_id = 'device-silent-99' AND status = 'OPEN'
+    `).get();
+    assert.ok(openIncident, 'Should have an open silence incident prior to heartbeat restoration');
+
+    // Ingest fresh heartbeat/telemetry event from device-silent-99
+    await appInstance.eventService.processIngestedEvent({
+      eventId: 'evt-heartbeat-recovery-01',
+      deviceId: 'device-silent-99',
+      sequenceNumber: 2,
+      timestamp: new Date().toISOString(),
+      type: 'telemetry',
+      payload: { temperature: 21.5, battery: 92 }
+    });
+
+    // Run watchdog check
+    appInstance.watchdog.checkDevices();
+
+    // Verify incident is now marked RESOLVED by auto-healing logic
+    const resolvedIncident = appInstance.db.prepare(`
+      SELECT * FROM incidents WHERE id = ?
+    `).get(openIncident.id);
+
+    assert.strictEqual(resolvedIncident.status, 'RESOLVED');
+    assert.ok(resolvedIncident.resolved_at);
+    assert.ok(resolvedIncident.resolution_notes.includes('Auto-healed'));
   });
 });

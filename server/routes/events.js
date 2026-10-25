@@ -3,10 +3,13 @@ const express = require('express');
 module.exports = function createEventsRouter(eventService, ingestionQueue) {
   const router = express.Router();
 
-  // Ingest single event
+  // Ingest single event with backpressure capacity check and ACID pipeline
   router.post('/', async (req, res) => {
     try {
-      // Ingest through queue or direct processing
+      // 1. Backpressure Guard: Check if bounded ingestion queue has capacity
+      ingestionQueue.checkCapacity(1);
+
+      // 2. Strict Schema Validation
       const validation = eventService.validatePayload(req.body);
       if (!validation.valid) {
         // Send malformed event directly to DLQ
@@ -18,7 +21,7 @@ module.exports = function createEventsRouter(eventService, ingestionQueue) {
         });
       }
 
-      // Process event synchronously or via queue
+      // 3. Process event through atomic ACID transaction
       const result = await eventService.processIngestedEvent(req.body);
       return res.status(200).json({
         success: true,
@@ -26,11 +29,12 @@ module.exports = function createEventsRouter(eventService, ingestionQueue) {
       });
     } catch (err) {
       if (err.status === 429) {
-        res.setHeader('Retry-After', err.retryAfter || 2);
+        const retryAfter = err.retryAfter || 2;
+        res.setHeader('Retry-After', retryAfter);
         return res.status(429).json({
           success: false,
-          error: err.message,
-          retryAfter: err.retryAfter || 2
+          error: err.message || 'Ingestion buffer capacity exceeded. System applying backpressure.',
+          retryAfter
         });
       }
 
@@ -53,6 +57,9 @@ module.exports = function createEventsRouter(eventService, ingestionQueue) {
           error: "Payload must include an 'events' array"
         });
       }
+
+      // Backpressure check for the entire incoming batch size
+      ingestionQueue.checkCapacity(events.length);
 
       const results = [];
       let acceptedCount = 0;
@@ -90,6 +97,16 @@ module.exports = function createEventsRouter(eventService, ingestionQueue) {
         results
       });
     } catch (err) {
+      if (err.status === 429) {
+        const retryAfter = err.retryAfter || 2;
+        res.setHeader('Retry-After', retryAfter);
+        return res.status(429).json({
+          success: false,
+          error: err.message || 'Ingestion buffer capacity exceeded. System applying backpressure.',
+          retryAfter
+        });
+      }
+
       console.error('[EventsRouter] Batch ingestion error:', err);
       return res.status(500).json({ success: false, error: err.message });
     }

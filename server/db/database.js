@@ -28,6 +28,27 @@ db.exec('PRAGMA journal_mode = WAL;');
 db.exec('PRAGMA synchronous = NORMAL;');
 db.exec('PRAGMA foreign_keys = ON;');
 
+// Polyfill transaction support for node:sqlite (DatabaseSync) if not natively present
+if (typeof db.transaction !== 'function') {
+  db.transaction = function (fn) {
+    return function (...args) {
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        const result = fn(...args);
+        db.exec('COMMIT;');
+        return result;
+      } catch (err) {
+        try {
+          db.exec('ROLLBACK;');
+        } catch (rbErr) {
+          // ignore rollback failure if transaction already aborted
+        }
+        throw err;
+      }
+    };
+  };
+}
+
 function initSchema() {
   const schema = `
     CREATE TABLE IF NOT EXISTS devices (

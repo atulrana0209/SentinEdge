@@ -56,27 +56,36 @@ class DeviceService {
       };
     }
 
-    // Check for out-of-order sequencing
+    // Check for out-of-order sequencing vs device reboot/rollover
     let isOutOfOrder = false;
     const lastSeq = existing.last_sequence_number || 0;
+    const lastSeenTime = existing.last_seen_at ? new Date(existing.last_seen_at).getTime() : 0;
+    const eventTimeMs = eventTime.getTime();
 
     if (sequenceNumber !== undefined && sequenceNumber !== null) {
       if (sequenceNumber < lastSeq) {
-        isOutOfOrder = true;
+        // If event timestamp is substantially newer than last_seen_at (>5s newer),
+        // the device restarted its sequence counter after a reboot.
+        if (eventTimeMs > lastSeenTime + 5000) {
+          isOutOfOrder = false;
+        } else {
+          isOutOfOrder = true;
+        }
       }
     } else if (existing.last_seen_at) {
-      const lastSeen = new Date(existing.last_seen_at);
-      if (eventTime.getTime() < lastSeen.getTime() - 2000) { // 2s skew tolerance
+      if (eventTimeMs < lastSeenTime - 2000) { // 2s skew tolerance
         isOutOfOrder = true;
       }
     }
 
     const wasOffline = existing.status === 'OFFLINE';
-    const newSeq = Math.max(lastSeq, sequenceNumber || lastSeq);
+    // If device rebooted, adopt current sequence; else monotonic high-water mark
+    const newSeq = isOutOfOrder ? lastSeq : (sequenceNumber !== undefined && sequenceNumber !== null ? Math.max(lastSeq, sequenceNumber) : lastSeq);
     const totalEvents = (existing.total_events || 0) + 1;
 
-    // Update device state. If out of order, we do not regress last_seen_at or last_sequence_number.
-    const updatedLastSeen = isOutOfOrder ? existing.last_seen_at : now;
+    // Advance last_seen_at if the event is live/recent, preventing false silence triggers
+    const isEventRecent = eventTimeMs >= (lastSeenTime - 2000);
+    const updatedLastSeen = (isEventRecent || !isOutOfOrder) ? now : existing.last_seen_at;
 
     this.db.prepare(`
       UPDATE devices

@@ -5,32 +5,36 @@ import {
   Cpu,
   Radio,
   Sliders,
-  ShieldAlert,
   Server,
   Play
 } from 'lucide-react';
 
 export default function Header({ activeTab, setActiveTab, connectionState, openIncidentsCount }) {
+  const isConnected = connectionState === 'CONNECTED';
+  const isReconnecting = connectionState === 'RECONNECTING';
+
   return (
     <header className="app-header">
+      {/* Brand & Product Identity */}
       <div className="brand-section">
         <div className="brand-logo">
-          <Activity size={20} color="#07090e" strokeWidth={2.5} />
+          <Activity size={17} color="#ffffff" strokeWidth={2.5} />
         </div>
         <div>
           <h1 className="brand-title">
-            MissionOps
+            SentinEdge
             <span className="brand-badge">Real-Time</span>
           </h1>
         </div>
       </div>
 
+      {/* Navigation Tabs */}
       <nav className="nav-tabs">
         <button
           className={`nav-tab-btn ${activeTab === 'overview' ? 'active' : ''}`}
           onClick={() => setActiveTab('overview')}
         >
-          <Cpu size={16} />
+          <Cpu size={14} />
           Fleet Overview
         </button>
 
@@ -38,7 +42,7 @@ export default function Header({ activeTab, setActiveTab, connectionState, openI
           className={`nav-tab-btn ${activeTab === 'events' ? 'active' : ''}`}
           onClick={() => setActiveTab('events')}
         >
-          <Radio size={16} />
+          <Radio size={14} />
           Live Event Stream
         </button>
 
@@ -46,10 +50,10 @@ export default function Header({ activeTab, setActiveTab, connectionState, openI
           className={`nav-tab-btn ${activeTab === 'incidents' ? 'active' : ''}`}
           onClick={() => setActiveTab('incidents')}
         >
-          <AlertTriangle size={16} />
+          <AlertTriangle size={14} />
           Incidents
           {openIncidentsCount > 0 && (
-            <span className="badge badge-critical" style={{ marginLeft: 4, padding: '1px 6px' }}>
+            <span className="tab-incident-badge">
               {openIncidentsCount}
             </span>
           )}
@@ -59,7 +63,7 @@ export default function Header({ activeTab, setActiveTab, connectionState, openI
           className={`nav-tab-btn ${activeTab === 'rules' ? 'active' : ''}`}
           onClick={() => setActiveTab('rules')}
         >
-          <Sliders size={16} />
+          <Sliders size={14} />
           Rule Engine
         </button>
 
@@ -67,31 +71,31 @@ export default function Header({ activeTab, setActiveTab, connectionState, openI
           className={`nav-tab-btn ${activeTab === 'health' ? 'active' : ''}`}
           onClick={() => setActiveTab('health')}
         >
-          <Server size={16} />
+          <Server size={14} />
           Health & DLQ
         </button>
 
         <button
           className={`nav-tab-btn ${activeTab === 'simulator' ? 'active' : ''}`}
           onClick={() => setActiveTab('simulator')}
-          style={{ border: '1px solid rgba(6, 182, 212, 0.4)' }}
         >
-          <Play size={16} color="#06b6d4" />
+          <Play size={14} color="#0284c7" />
           Device Simulator
         </button>
       </nav>
 
+      {/* Connection & System Telemetry Status */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div className={`connection-pill ${
-          connectionState === 'CONNECTED' ? 'connected' :
-          connectionState === 'RECONNECTING' ? 'reconnecting' : 'disconnected'
+        <div className={`status-pill ${
+          isConnected ? 'connected' :
+          isReconnecting ? 'reconnecting' : 'disconnected'
         }`}>
-          <span className={`status-dot ${
-            connectionState === 'CONNECTED' ? 'online' :
-            connectionState === 'RECONNECTING' ? 'degraded' : 'offline'
+          <span className={`pulse-dot ${
+            isConnected ? 'online' :
+            isReconnecting ? 'warning' : 'offline'
           }`} />
-          {connectionState === 'CONNECTED' ? 'STREAM: LIVE' :
-           connectionState === 'RECONNECTING' ? 'RECONNECTING...' : 'DISCONNECTED'}
+          {isConnected ? 'STREAM: LIVE' :
+           isReconnecting ? 'RECONNECTING...' : 'DISCONNECTED'}
         </div>
       </div>
     </header>

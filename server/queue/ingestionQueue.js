@@ -28,17 +28,26 @@ class IngestionQueue {
   }
 
   /**
-   * Enqueue a validated or raw event for processing.
-   * If queue is full, throws error for HTTP 429 backpressure response.
+   * Evaluates if queue has capacity for incoming items.
+   * Throws HTTP 429 Error with retryAfter if capacity exceeded.
    */
-  enqueue(eventData) {
-    if (this.queue.length >= this.maxCapacity) {
-      this.totalRejected++;
+  checkCapacity(count = 1) {
+    if (this.queue.length + count > this.maxCapacity) {
+      this.totalRejected += count;
       const err = new Error('Ingestion buffer capacity exceeded. System applying backpressure.');
       err.status = 429;
       err.retryAfter = 2; // seconds
       throw err;
     }
+    return true;
+  }
+
+  /**
+   * Enqueue a validated or raw event for processing.
+   * If queue is full, throws error for HTTP 429 backpressure response.
+   */
+  enqueue(eventData) {
+    this.checkCapacity(1);
 
     this.queue.push({
       item: eventData,
